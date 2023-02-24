@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+axum = "0.6.7"
+# axum-boiler = { git = "https://github.com/m-lima/axum-boiler", default-features = false, features = ["log-spans"]  }
+axum-boiler = { path = "../axum-boiler", default-features = false, features = ["log-spans"]  }
+clap = { version = "4.1.6", features = ["derive"] }
+hyper = { version = "0.14.24", features = ["client"] }
+tower = "0.4.13"
+tower-http = { version = "0.3.5", features = ["cors", "fs"] }
+tracing = "0.1.37"
