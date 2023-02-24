@@ -39,7 +39,8 @@ pub struct Args {
 #[derive(Debug, Clone)]
 pub enum Target {
     Dir(std::path::PathBuf),
-    Net(hyper::Uri),
+    Http(hyper::Uri),
+    Https(hyper::Uri),
 }
 
 #[derive(Debug, Clone)]
@@ -70,7 +71,7 @@ impl RawServePoint {
 #[derive(clap::Parser, Debug)]
 #[clap(author, version, about, color = clap::ColorChoice::Always, long_about = None)]
 struct RawArgs {
-    /// Serve points in the `[port]:[path]:[@]target` format
+    /// Serve points in the `[port]:[path]:target` format
     ///
     /// Port will default to 3030 if omitted.
     /// Path will default to "/" if omitted.
@@ -128,15 +129,15 @@ fn parse_serve_point(value: &str) -> Result<RawServePoint, String> {
     let mut parts = value.splitn(3, ':');
 
     let Some(port) = parts.next() else {
-        return Err(String::from("Expected format [port]:[path]:[@]target"));
+        return Err(String::from("Expected format [port]:[path]:target"));
     };
 
     let Some(path) = parts.next() else {
-        return Err(String::from("Expected format [port]:[path]:[@]target"));
+        return Err(String::from("Expected format [port]:[path]:target"));
     };
 
     let Some(target) = parts.next() else {
-        return Err(String::from("Expected format [port]:[path]:[@]target"));
+        return Err(String::from("Expected format [port]:[path]:target"));
     };
 
     let port = if port.is_empty() {
@@ -156,8 +157,13 @@ fn parse_serve_point(value: &str) -> Result<RawServePoint, String> {
         format!("/{path}")
     };
 
-    let target = if let Some(target) = target.strip_prefix('@') {
-        match hyper::Uri::try_from(target).map(Target::Net) {
+    let target = if target.starts_with("http://") {
+        match hyper::Uri::try_from(target).map(Target::Http) {
+            Ok(target) => target,
+            Err(e) => return Err(format!("Could not parse target URI from `{target}`: {e:?}")),
+        }
+    } else if target.starts_with("https://") {
+        match hyper::Uri::try_from(target).map(Target::Https) {
             Ok(target) => target,
             Err(e) => return Err(format!("Could not parse target URI from `{target}`: {e:?}")),
         }

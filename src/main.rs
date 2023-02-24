@@ -8,9 +8,14 @@ fn main() -> impl std::process::Termination {
         return e.into();
     }
 
-    tracing::info!(?args, "Configuration loaded");
+    tracing::info!(
+        cors = %args.cors,
+        verbosity = %args.verbosity,
+        serve_points = ?args.serve_points,
+        "Configuration loaded"
+    );
 
-    for (port, serve_points) in args.serve_points {
+    let serve_points = args.serve_points.into_iter().map(|(port, serve_points)| {
         let mut router = axum::Router::<(), hyper::Body>::new();
         for serve_point in serve_points {
             match serve_point.target {
@@ -23,14 +28,18 @@ fn main() -> impl std::process::Termination {
                             }),
                     );
                 }
-                args::Target::Net(net) => {
+                args::Target::Http(target) => {
                     router = router.nest_service(
                         &serve_point.path,
                         Proxy {
                             client: hyper::Client::new(),
-                            target: net,
+                            target,
                         },
                     );
+                }
+                args::Target::Https(target) => {
+                    let client = hyper::Client::builder().build(hyper_tls::HttpsConnector::new());
+                    router = router.nest_service(&serve_point.path, Proxy { client, target });
                 }
             }
         }
@@ -39,22 +48,28 @@ fn main() -> impl std::process::Termination {
             router = router.layer(tower_http::cors::CorsLayer::very_permissive());
         }
 
-        if let Err(e) = axum_boiler::serve(router, ([0, 0, 0, 0], port)) {
-            tracing::error!("{e}");
-            return e.into();
-        }
-    }
+        (([0, 0, 0, 0], port).into(), router)
+    });
 
-    std::process::ExitCode::SUCCESS
+    axum_boiler::serve_multiple(serve_points).map_or_else(
+        |e| {
+            tracing::error!("{e}");
+            e.into()
+        },
+        |_| std::process::ExitCode::SUCCESS,
+    )
 }
 
 #[derive(Clone, Debug)]
-struct Proxy {
-    client: hyper::Client<hyper::client::HttpConnector, hyper::Body>,
+struct Proxy<Connector> {
+    client: hyper::Client<Connector, hyper::Body>,
     target: hyper::Uri,
 }
 
-impl tower::Service<hyper::Request<hyper::Body>> for Proxy {
+impl<Connector> tower::Service<hyper::Request<hyper::Body>> for Proxy<Connector>
+where
+    Connector: 'static + Clone + Send + Sync + hyper::client::connect::Connect,
+{
     type Response = hyper::Response<hyper::Body>;
     type Error = std::convert::Infallible;
     type Future = std::pin::Pin<
@@ -68,31 +83,35 @@ impl tower::Service<hyper::Request<hyper::Body>> for Proxy {
         std::task::Poll::Ready(Ok(()))
     }
 
-    #[tracing::instrument(fields(yo = "bla"), skip_all)]
     fn call(&mut self, request: hyper::Request<hyper::Body>) -> Self::Future {
         let client = self.client.clone();
 
-        let uri = format!(
-            "{target}{path}",
-            target = self.target,
-            path = request
-                .uri()
-                .path_and_query()
-                .map_or(request.uri().path(), |v| v.as_str())
-        );
+        let path = request
+            .uri()
+            .path_and_query()
+            .map_or(request.uri().path(), |v| v.as_str())
+            .trim_start_matches('/');
+
+        let uri = format!("{target}{path}", target = self.target);
 
         Box::pin(proxy(client, uri, request))
     }
 }
 
 #[tracing::instrument(fields(%uri), skip_all)]
-async fn proxy(
-    client: hyper::Client<hyper::client::HttpConnector, hyper::Body>,
+async fn proxy<Connector>(
+    client: hyper::Client<Connector, hyper::Body>,
     uri: String,
     mut request: hyper::Request<hyper::Body>,
-) -> Result<hyper::Response<hyper::Body>, std::convert::Infallible> {
+) -> Result<hyper::Response<hyper::Body>, std::convert::Infallible>
+where
+    Connector: 'static + Clone + Send + Sync + hyper::client::connect::Connect,
+{
     match hyper::Uri::try_from(&uri) {
         Ok(uri) => {
+            if let Some(Ok(host)) = uri.host().map(hyper::header::HeaderValue::from_str) {
+                request.headers_mut().insert(hyper::header::HOST, host);
+            }
             *request.uri_mut() = uri;
             client.request(request).await.or_else(|e| {
                 tracing::error!("Proxy error: {e}");
